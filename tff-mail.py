@@ -12,7 +12,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = os.getenv("TOKEN")
 
 # --- TELEGRAM ---
-CHAT_ID = "--"
+CHAT_ID = "1292276069"
 
 # --- GMAIL ---
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
