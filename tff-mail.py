@@ -206,7 +206,13 @@ async def tum_kullanicilara_gonder(context, mesaj):
             parse_mode="HTML"
         )
 
-
+async def bot_canli(context: ContextTypes.DEFAULT_TYPE):
+    for chat_id in aktif_kullanicilar:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🤖 Bot çalışıyor (test)"
+        )
+        
 # --- MAIL KONTROL ---
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
     global son_yeni_mail_yok_mesaji
@@ -295,6 +301,7 @@ app.add_handler(CommandHandler("start", start))
 
 # 60 saniyede bir çalışır
 app.job_queue.run_repeating(mail_kontrol, interval=60, first=10)
+app.job_queue.run_repeating(bot_canli, interval=60, first=5)
 
 print("🤖 Mail bot çalışıyor...")
 app.run_polling()
