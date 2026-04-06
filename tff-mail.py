@@ -3,7 +3,7 @@ import re
 import imaplib
 import email
 from email.header import decode_header
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 from html import escape
@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v2.5 PY313 FIX"
+VERSION = "v2.6 ALERT MODE"
 
 TOKEN = os.getenv("TOKEN")
 
@@ -24,7 +24,10 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
 aktif_kullanicilar = {CHAT_ID}
-son_3_mail_idleri = []
+son_5_mail_idleri = []
+
+last_summary_time = datetime.now()
+alert_mode_until = None
 
 # --- ANAHTAR KELİMELER ---
 ANAHTAR_KELIMELER = [
@@ -231,38 +234,67 @@ async def gonder(context, mesaj):
 
 # --- ANA KONTROL ---
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
-    global son_3_mail_idleri
+    global son_5_mail_idleri, last_summary_time, alert_mode_until
 
     try:
-        await gonder(context, f"📩 Mail sistemi çalışıyor ({VERSION})")
-
         mailler = mailleri_getir()
-        await gonder(context, f"📊 Bulunan mail sayısı: {len(mailler)}")
+        simdi = datetime.now()
 
-        son3 = mailler[:3]
-        ids = [m["id"] for m in son3]
+        son5 = mailler[:5]
+        ids = [m["id"] for m in son5]
 
-        if not son_3_mail_idleri:
-            son_3_mail_idleri = ids.copy()
+        # İlk açılışta sadece mevcut durumu hafızaya al
+        if not son_5_mail_idleri:
+            son_5_mail_idleri = ids.copy()
 
-        elif ids != son_3_mail_idleri:
-            son_3_mail_idleri = ids.copy()
+        # Yeni mail / değişim kontrolü
+        yeni_mail_var = ids != son_5_mail_idleri
 
-            if son3:
-                m = son3[0]
-                klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+        if yeni_mail_var:
+            son_5_mail_idleri = ids.copy()
+            alert_mode_until = simdi + timedelta(minutes=10)
 
-                await gonder(
-                    context,
-                    f"🚨 <b>YENİ MAIL</b>\n\n"
-                    f"📌 <b>Konu:</b> {escape(m['konu'])}\n"
-                    f"👤 <b>Gönderen:</b> {escape(m['gonderen'])}\n"
-                    f"📂 <b>Klasör:</b> {escape(klasor)}\n"
-                    f"📝 <b>İçerik:</b> {escape(m['govde'])}",
-                )
+            await gonder(
+                context,
+                "🚨 <b>Yeni mail algılandı</b>\n"
+                "⏱ <b>Alarm modu başladı:</b> 10 dakika boyunca her dakika son 5 konu gönderilecek."
+            )
+
+        # Alarm modu aktifse her dakika son 5 mail konusunu gönder
+        if alert_mode_until and simdi < alert_mode_until:
+            if son5:
+                mesaj = "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
+                for i, m in enumerate(son5, 1):
+                    klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+                    mesaj += f"{i}. <b>{escape(m['konu'])}</b> <i>({escape(klasor)})</i>\n"
+
+                await gonder(context, mesaj)
+            else:
+                await gonder(context, "ℹ️ <b>Alarm modu aktif</b>\nAma filtreye uyan mail bulunamadı.")
+
+        # Alarm modu bittiyse kapat
+        if alert_mode_until and simdi >= alert_mode_until:
+            alert_mode_until = None
+            await gonder(context, "✅ <b>Alarm modu sona erdi</b>")
+
+        # 15 dakikada bir genel özet
+        if (simdi - last_summary_time).total_seconds() >= 900:
+            inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
+            spam = len([m for m in mailler if "Spam" in m["klasor"]])
+
+            await gonder(
+                context,
+                f"📊 <b>Mail Durum Özeti</b>\n\n"
+                f"📥 <b>Inbox:</b> {inbox}\n"
+                f"🚫 <b>Spam:</b> {spam}\n"
+                f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
+                f"🤖 Sistem aktif çalışıyor",
+            )
+
+            last_summary_time = simdi
 
     except Exception as e:
-        await gonder(context, f"❌ HATA: {escape(str(e))}")
+        await gonder(context, f"❌ <b>HATA:</b> {escape(str(e))}")
 
 
 # --- KOMUTLAR ---
