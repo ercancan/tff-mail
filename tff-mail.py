@@ -1,4 +1,5 @@
 import os
+import re
 import imaplib
 import email
 from email.header import decode_header
@@ -6,11 +7,12 @@ from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 from html import escape
+from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v2.0"
+VERSION = "v2.1"
 
 TOKEN = os.getenv("TOKEN")
 
@@ -92,32 +94,68 @@ def imap_baglan():
     return mail
 
 
+def html_to_text(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    for tag in soup(["script", "style", "meta", "head", "title"]):
+        tag.decompose()
+
+    text = soup.get_text(separator="\n")
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    return text.strip()
+
+
 def govdeyi_al(msg):
-    govde = ""
+    plain_text = ""
+    html_text = ""
 
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition"))
+            content_disposition = str(part.get("Content-Disposition") or "").lower()
 
-            if content_type == "text/plain" and "attachment" not in content_disposition:
-                try:
-                    govde = part.get_payload(decode=True).decode(
-                        part.get_content_charset() or "utf-8",
-                        errors="ignore"
-                    ).strip()
-                    break
-                except:
-                    pass
+            if "attachment" in content_disposition:
+                continue
+
+            try:
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+
+                charset = part.get_content_charset() or "utf-8"
+                decoded = payload.decode(charset, errors="ignore").strip()
+
+                if content_type == "text/plain" and not plain_text:
+                    plain_text = decoded
+
+                elif content_type == "text/html" and not html_text:
+                    html_text = html_to_text(decoded)
+
+            except Exception:
+                continue
     else:
         try:
-            govde = msg.get_payload(decode=True).decode(
-                msg.get_content_charset() or "utf-8",
-                errors="ignore"
-            ).strip()
-        except:
-            govde = ""
+            payload = msg.get_payload(decode=True)
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                decoded = payload.decode(charset, errors="ignore").strip()
+                content_type = msg.get_content_type()
 
+                if content_type == "text/html":
+                    html_text = html_to_text(decoded)
+                else:
+                    plain_text = decoded
+        except Exception:
+            pass
+
+    govde = plain_text if plain_text else html_text
+
+    if not govde:
+        govde = "(İçerik yok)"
+
+    govde = re.sub(r"\n\s*\n+", "\n\n", govde).strip()
     return govde
 
 
@@ -176,8 +214,8 @@ def mailleri_getir():
                     if not ilgili_mail_mi(gonderen, konu, govde):
                         continue
 
-                    if len(govde) > 300:
-                        govde = govde[:300] + "..."
+                    if len(govde) > 500:
+                        govde = govde[:500] + "..."
 
                     kimlik = f"{klasor}:{uid.decode()}"
 
