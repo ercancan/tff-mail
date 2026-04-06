@@ -10,8 +10,8 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
-  
-# --- TELEGRAM  s---
+
+# --- TELEGRAM ---
 CHAT_ID = "1292276069"
 
 # --- GMAIL ---
