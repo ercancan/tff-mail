@@ -3,7 +3,7 @@ import re
 import imaplib
 import email
 from email.header import decode_header
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask
 from threading import Thread
 from html import escape
@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v2.2"
+VERSION = "v2.3 DEBUG"
 
 TOKEN = os.getenv("TOKEN")
 
@@ -26,20 +26,34 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 aktif_kullanicilar = set()
 aktif_kullanicilar.add(CHAT_ID)
 
-son_yeni_mail_yok_mesaji = None
-son_saatlik_ozet = None
 son_3_mail_idleri = []
-son_canli_mesaji = None   # 👈 YENİ
 
 # --- ANAHTAR KELİMELER ---
 ANAHTAR_KELIMELER = [
-    "tff","fifa","türkiye","turkiye","futbol","federasyon","taraftar",
-    "milli","takım","takim","taraftarkulubu","taraftar kulubu",
-    "kırmızı","kirmizi","bilet","kupa","dünya","dunya"
+    "tff",
+    "fifa",
+    "türkiye",
+    "turkiye",
+    "futbol",
+    "federasyon",
+    "taraftar",
+    "milli",
+    "takım",
+    "takim",
+    "taraftarkulubu",
+    "taraftar kulubu",
+    "kırmızı",
+    "kirmizi",
+    "bilet",
+    "kupa",
+    "dünya",
+    "dunya"
 ]
 
 ANAHTAR_IFADELER = [
-    "fifa code","verification code","security code"
+    "fifa code",
+    "verification code",
+    "security code"
 ]
 
 # --- WEB KEEPALIVE ---
@@ -49,35 +63,47 @@ web_app = Flask(__name__)
 def home():
     return f"Mail bot çalışıyor - {VERSION}", 200
 
+
 def run_web():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
+
 
 # --- UTIL ---
 def decode_mime_text(value):
     if not value:
         return ""
+
     parts = decode_header(value)
     sonuc = ""
+
     for text, enc in parts:
         if isinstance(text, bytes):
             sonuc += text.decode(enc or "utf-8", errors="ignore")
         else:
             sonuc += text
+
     return sonuc.strip()
+
 
 def imap_baglan():
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
     return mail
 
+
 def html_to_text(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
-    for tag in soup(["script","style","meta","head","title"]):
+
+    for tag in soup(["script", "style", "meta", "head", "title"]):
         tag.decompose()
+
     text = soup.get_text(separator="\n")
     text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
     return text.strip()
+
 
 def govdeyi_al(msg):
     plain_text = ""
@@ -86,131 +112,191 @@ def govdeyi_al(msg):
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition") or "").lower()
+
+            if "attachment" in content_disposition:
+                continue
+
             try:
                 payload = part.get_payload(decode=True)
                 if not payload:
                     continue
+
                 charset = part.get_content_charset() or "utf-8"
                 decoded = payload.decode(charset, errors="ignore").strip()
 
-                if content_type == "text/plain":
+                if content_type == "text/plain" and not plain_text:
                     plain_text = decoded
-                elif content_type == "text/html":
+                elif content_type == "text/html" and not html_text:
                     html_text = html_to_text(decoded)
-            except:
+
+            except Exception:
                 continue
     else:
         try:
             payload = msg.get_payload(decode=True)
-            charset = msg.get_content_charset() or "utf-8"
-            decoded = payload.decode(charset, errors="ignore").strip()
-            html_text = html_to_text(decoded)
-        except:
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                decoded = payload.decode(charset, errors="ignore").strip()
+
+                if msg.get_content_type() == "text/html":
+                    html_text = html_to_text(decoded)
+                else:
+                    plain_text = decoded
+        except Exception:
             pass
 
-    return plain_text if plain_text else html_text
+    govde = plain_text if plain_text else html_text
+
+    if not govde:
+        govde = "(İçerik yok)"
+
+    govde = re.sub(r"\n\s*\n+", "\n\n", govde).strip()
+    return govde
+
 
 def ilgili_mail_mi(gonderen, konu, govde):
     tum = f"{gonderen} {konu} {govde}".lower()
-    return any(k in tum for k in ANAHTAR_KELIMELER) or any(i in tum for i in ANAHTAR_IFADELER)
+
+    kelime_eslesmesi = any(k in tum for k in ANAHTAR_KELIMELER)
+    ifade_eslesmesi = any(i in tum for i in ANAHTAR_IFADELER)
+
+    return kelime_eslesmesi or ifade_eslesmesi
+
 
 # --- MAIL GETİR ---
 def mailleri_getir():
     bulunan = []
+
     try:
         mail = imap_baglan()
-        for klasor in ["INBOX","[Gmail]/Spam"]:
+
+        for klasor in ["INBOX", "[Gmail]/Spam"]:
             try:
-                mail.select(klasor)
-                status,data = mail.uid("search",None,"ALL")
+                status, _ = mail.select(klasor)
+                if status != "OK":
+                    continue
+
+                status, data = mail.uid("search", None, "ALL")
+                if status != "OK":
+                    continue
+
                 uid_list = data[0].split()
 
                 for uid in uid_list[-50:]:
-                    status,msg_data = mail.uid("fetch",uid,"(RFC822)")
+                    status, msg_data = mail.uid("fetch", uid, "(RFC822)")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+
                     raw = msg_data[0][1]
                     msg = email.message_from_bytes(raw)
 
-                    konu = decode_mime_text(msg.get("Subject",""))
-                    gonderen = decode_mime_text(msg.get("From",""))
+                    konu = decode_mime_text(msg.get("Subject", ""))
+                    gonderen = decode_mime_text(msg.get("From", ""))
                     govde = govdeyi_al(msg)
 
-                    if not ilgili_mail_mi(gonderen,konu,govde):
+                    if not ilgili_mail_mi(gonderen, konu, govde):
                         continue
 
                     bulunan.append({
                         "id": f"{klasor}:{uid.decode()}",
-                        "konu": konu,
-                        "gonderen": gonderen,
-                        "govde": govde[:500],
+                        "konu": konu or "(Konu yok)",
+                        "gonderen": gonderen or "(Gönderen yok)",
+                        "govde": (govde or "(İçerik yok)")[:500],
                         "klasor": klasor
                     })
-            except:
+
+            except Exception:
                 continue
+
         mail.logout()
+
     except Exception as e:
-        print(e)
+        raise Exception(f"Mail okuma hatası: {str(e)}")
 
     bulunan.reverse()
     return bulunan
 
+
 # --- TELEGRAM ---
-async def gonder(context,mesaj):
+async def gonder(context, mesaj):
     for chat_id in aktif_kullanicilar:
-        await context.bot.send_message(chat_id=chat_id,text=mesaj,parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=mesaj,
+            parse_mode="HTML"
+        )
+
 
 # --- ANA KONTROL ---
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
-    global son_3_mail_idleri,son_yeni_mail_yok_mesaji,son_saatlik_ozet,son_canli_mesaji
+    global son_3_mail_idleri
 
-    simdi = datetime.now()
-    mailler = mailleri_getir()
-    son3 = mailler[:3]
-    ids = [m["id"] for m in son3]
+    try:
+        # 1) Bot çalışıyor testi
+        await gonder(context, f"📩 Mail sistemi çalışıyor ({VERSION})")
 
-    # --- YENİ MAIL ---
-    if not son_3_mail_idleri:
-        son_3_mail_idleri = ids.copy()
+        # 2) Mailleri çek
+        mailler = mailleri_getir()
 
-    elif ids != son_3_mail_idleri:
-        son_3_mail_idleri = ids.copy()
+        # 3) Kaç mail bulunduğunu yaz
+        await gonder(context, f"📊 Bulunan mail sayısı: {len(mailler)}")
 
-        m = son3[0]
-        klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+        son3 = mailler[:3]
+        ids = [m["id"] for m in son3]
 
-        await gonder(context,
-            f"📩 <b>Yeni mail geldi!</b>\n\n"
-            f"{escape(m['konu'])}\n"
-            f"{escape(m['gonderen'])}\n"
-            f"{escape(klasor)}\n"
-            f"{escape(m['govde'])}"
-        )
+        # 4) İlk çalışmada hafızaya al
+        if not son_3_mail_idleri:
+            son_3_mail_idleri = ids.copy()
 
-    # --- 15 DK BİLGİ ---
-    else:
-        if son_yeni_mail_yok_mesaji is None or (simdi-son_yeni_mail_yok_mesaji)>=timedelta(minutes=15):
-            await gonder(context,f"ℹ️ Yeni mail yok ({VERSION})")
-            son_yeni_mail_yok_mesaji = simdi
+        # 5) Son 3 mail değiştiyse yeni mail bildir
+        elif ids != son_3_mail_idleri:
+            son_3_mail_idleri = ids.copy()
 
-    # --- 🔥 YENİ EKLEME: BOT CANLI ---
-    if son_canli_mesaji is None or (simdi-son_canli_mesaji)>=timedelta(minutes=15):
-        await gonder(context,f"🤖 Bot çalışıyor ({VERSION})")
-        son_canli_mesaji = simdi
+            if son3:
+                m = son3[0]
+                klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+
+                await gonder(
+                    context,
+                    f"🚨 <b>YENİ MAIL!</b>\n\n"
+                    f"📌 <b>Konu:</b> {escape(m['konu'])}\n"
+                    f"👤 <b>Gönderen:</b> {escape(m['gonderen'])}\n"
+                    f"📂 <b>Klasör:</b> {escape(klasor)}\n"
+                    f"📝 <b>İçerik:</b> {escape(m['govde'])}"
+                )
+
+    except Exception as e:
+        await gonder(context, f"❌ HATA: {escape(str(e))}")
+
 
 # --- KOMUTLAR ---
-async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 Başladı ({VERSION})")
 
-async def version(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Version: {VERSION}")
+
+async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"📌 Aktif sürüm: {VERSION}")
+
+
+# --- BAŞLANGIÇ MESAJI ---
+async def baslangic_mesaji(app):
+    for chat_id in aktif_kullanicilar:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=f"🤖 Bot aktif ({VERSION})"
+        )
+
 
 # --- BAŞLAT ---
-Thread(target=run_web,daemon=True).start()
+Thread(target=run_web, daemon=True).start()
 
 app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start",start))
-app.add_handler(CommandHandler("version",version))
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("version", version))
 
-app.job_queue.run_repeating(mail_kontrol,interval=60,first=10)
+app.job_queue.run_repeating(mail_kontrol, interval=60, first=10)
+app.post_init = baslangic_mesaji
 
-print("BOT BAŞLADI")
+print(f"BOT BAŞLADI - {VERSION}")
 app.run_polling()
