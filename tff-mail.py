@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import imaplib
 import email
 from email.header import decode_header
@@ -12,7 +13,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v2.1"
+VERSION = "v3.0"
 
 TOKEN = os.getenv("TOKEN")
 
@@ -23,12 +24,14 @@ CHAT_ID = "1292276069"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
+# --- STATE FILE ---
+STATE_FILE = "mail_state.json"
+
 aktif_kullanicilar = set()
 aktif_kullanicilar.add(CHAT_ID)
 
 son_yeni_mail_yok_mesaji = None
 son_saatlik_ozet = None
-son_3_mail_idleri = []
 
 # Tek kelimeler
 ANAHTAR_KELIMELER = [
@@ -70,6 +73,29 @@ def home():
 def run_web():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data)
+        except Exception as e:
+            print(f"State okuma hatası: {e}")
+            return set()
+    return set()
+
+
+def save_state(data):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(data), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"State yazma hatası: {e}")
+
+
+gonderilen_mail_idleri = load_state()
 
 
 def decode_mime_text(value):
@@ -166,13 +192,8 @@ def ilgili_mail_mi(gonderen, konu, govde):
 
     tum_metin = f"{gonderen_l} {konu_l} {govde_l}"
 
-    kelime_eslesmesi = any(
-        kelime in tum_metin for kelime in ANAHTAR_KELIMELER
-    )
-
-    ifade_eslesmesi = any(
-        ifade in tum_metin for ifade in ANAHTAR_IFADELER
-    )
+    kelime_eslesmesi = any(kelime in tum_metin for kelime in ANAHTAR_KELIMELER)
+    ifade_eslesmesi = any(ifade in tum_metin for ifade in ANAHTAR_IFADELER)
 
     return kelime_eslesmesi or ifade_eslesmesi
 
@@ -188,12 +209,14 @@ def mailleri_getir():
             try:
                 status, _ = mail.select(klasor)
                 if status != "OK":
+                    print(f"Klasör seçilemedi: {klasor}")
                     continue
 
                 since_date = (datetime.now() - timedelta(days=3)).strftime("%d-%b-%Y")
                 status, data = mail.uid("search", None, f'(SINCE "{since_date}")')
 
                 if status != "OK":
+                    print(f"Mail arama başarısız: {klasor}")
                     continue
 
                 uid_list = data[0].split()
@@ -228,7 +251,8 @@ def mailleri_getir():
                         "klasor": klasor
                     })
 
-            except Exception:
+            except Exception as e:
+                print(f"Klasör okuma hatası ({klasor}): {e}")
                 continue
 
         mail.logout()
@@ -253,38 +277,38 @@ async def tum_kullanicilara_gonder(context, mesaj):
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
     global son_yeni_mail_yok_mesaji
     global son_saatlik_ozet
-    global son_3_mail_idleri
+    global gonderilen_mail_idleri
 
     try:
         simdi = datetime.now()
         mailler = mailleri_getir()
-        son_3_mail = mailler[:3]
-        yeni_son_3_idleri = [mail_item["id"] for mail_item in son_3_mail]
 
-        # İlk çalışmada hafızaya al, bildirim atma
-        if not son_3_mail_idleri:
-            son_3_mail_idleri = yeni_son_3_idleri.copy()
+        print(f"{len(mailler)} ilgili mail bulundu")
 
-        # Son 3 mail değiştiyse yeni mail bildirimi at
-        elif yeni_son_3_idleri != son_3_mail_idleri:
-            son_3_mail_idleri = yeni_son_3_idleri.copy()
+        yeni_mail_var = False
 
-            if son_3_mail:
-                en_yeni_mail = son_3_mail[0]
-                klasor_adi = "Spam" if "Spam" in en_yeni_mail["klasor"] else "Inbox"
+        # Eskiden yeniye gitmesi için ters sırada dolaşıyoruz
+        for mail_item in reversed(mailler):
+            if mail_item["id"] not in gonderilen_mail_idleri:
+                gonderilen_mail_idleri.add(mail_item["id"])
+                save_state(gonderilen_mail_idleri)
+                yeni_mail_var = True
+
+                klasor_adi = "Spam" if "Spam" in mail_item["klasor"] else "Inbox"
 
                 mesaj = (
                     f"📩 <b>Yeni mail geldi!</b>\n\n"
-                    f"📌 <b>Konu:</b> {escape(en_yeni_mail['konu'])}\n"
-                    f"👤 <b>Gönderen:</b> {escape(en_yeni_mail['gonderen'])}\n"
+                    f"📌 <b>Konu:</b> {escape(mail_item['konu'])}\n"
+                    f"👤 <b>Gönderen:</b> {escape(mail_item['gonderen'])}\n"
                     f"📂 <b>Klasör:</b> {escape(klasor_adi)}\n"
-                    f"📝 <b>İçerik:</b> {escape(en_yeni_mail['govde'])}"
+                    f"📝 <b>İçerik:</b> {escape(mail_item['govde'])}"
                 )
 
                 await tum_kullanicilara_gonder(context, mesaj)
+                print(f"Yeni mail gönderildi: {mail_item['konu']}")
 
-        # Son 3 değişmediyse sadece 15 dakikada bir bilgi ver
-        else:
+        # Yeni mail yoksa 15 dakikada bir bilgi mesajı
+        if not yeni_mail_var:
             if (
                 son_yeni_mail_yok_mesaji is None
                 or (simdi - son_yeni_mail_yok_mesaji) >= timedelta(minutes=15)
@@ -301,6 +325,8 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
         if son_saatlik_ozet != bu_saat:
             son_saatlik_ozet = bu_saat
 
+            son_3_mail = mailler[:3]
+
             if son_3_mail:
                 mesaj = f"🕐 <b>Son 3 ilgili mail</b> ({VERSION})\n\n"
 
@@ -314,6 +340,7 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
                 await tum_kullanicilara_gonder(context, mesaj)
 
     except Exception as e:
+        print(f"mail_kontrol hatası: {e}")
         for chat_id in aktif_kullanicilar:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -324,15 +351,10 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
 
 # --- /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global son_3_mail_idleri
-
     chat_id = str(update.effective_chat.id)
     aktif_kullanicilar.add(chat_id)
 
     await update.message.reply_text(f"🚀 Mail takibi başlatıldı! ({VERSION})")
-
-    mailler = mailleri_getir()
-    son_3_mail_idleri = [mail_item["id"] for mail_item in mailler[:3]]
 
 
 # --- /version ---
