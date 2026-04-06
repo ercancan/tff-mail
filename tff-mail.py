@@ -21,10 +21,9 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 aktif_kullanicilar = set()
 aktif_kullanicilar.add(CHAT_ID)
 
-gonderilen_mailler = set()
 son_yeni_mail_yok_mesaji = None
-yeni_mail_bildirim_bitis = None
 son_saatlik_ozet = None
+son_3_mail_idleri = []
 
 # Tek kelimeler
 ANAHTAR_KELIMELER = [
@@ -122,13 +121,8 @@ def tff_mail_mi(gonderen, konu, govde):
 
     tum_metin = f"{gonderen_l} {konu_l} {govde_l}"
 
-    kelime_eslesmesi = any(
-        kelime in tum_metin for kelime in ANAHTAR_KELIMELER
-    )
-
-    ifade_eslesmesi = any(
-        ifade in tum_metin for ifade in ANAHTAR_IFADELER
-    )
+    kelime_eslesmesi = any(kelime in tum_metin for kelime in ANAHTAR_KELIMELER)
+    ifade_eslesmesi = any(ifade in tum_metin for ifade in ANAHTAR_IFADELER)
 
     return kelime_eslesmesi or ifade_eslesmesi
 
@@ -138,7 +132,6 @@ def mailleri_getir():
 
     try:
         mail = imap_baglan()
-
         klasorler = ["INBOX", "[Gmail]/Spam"]
 
         for klasor in klasorler:
@@ -166,7 +159,6 @@ def mailleri_getir():
                     konu = decode_mime_text(msg.get("Subject", ""))
                     gonderen = decode_mime_text(msg.get("From", ""))
                     tarih = decode_mime_text(msg.get("Date", ""))
-
                     govde = govdeyi_al(msg)
 
                     if not tff_mail_mi(gonderen, konu, govde):
@@ -206,43 +198,42 @@ async def tum_kullanicilara_gonder(context, mesaj):
             parse_mode="HTML"
         )
 
-async def bot_canli(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id in aktif_kullanicilar:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="🤖 Bot çalışıyor (test)"
-        )
-        
+
 # --- MAIL KONTROL ---
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
     global son_yeni_mail_yok_mesaji
-    global yeni_mail_bildirim_bitis
     global son_saatlik_ozet
+    global son_3_mail_idleri
 
     try:
         simdi = datetime.now()
         mailler = mailleri_getir()
+        son_3_mail = mailler[:3]
+        yeni_son_3_idleri = [mail_item["id"] for mail_item in son_3_mail]
 
-        yeni_mail_var = False
+        # İlk çalışmada hafızaya al, bildirim atma
+        if not son_3_mail_idleri:
+            son_3_mail_idleri = yeni_son_3_idleri.copy()
 
-        for mail_item in mailler:
-            if mail_item["id"] not in gonderilen_mailler:
-                gonderilen_mailler.add(mail_item["id"])
-                yeni_mail_var = True
+        # Son 3 mail değiştiyse bildirim at
+        elif yeni_son_3_idleri != son_3_mail_idleri:
+            son_3_mail_idleri = yeni_son_3_idleri.copy()
 
-        if yeni_mail_var:
-            yeni_mail_bildirim_bitis = simdi + timedelta(minutes=15)
-            await tum_kullanicilara_gonder(
-                context,
-                "📩 <b>Yeni ilgili mail geldi, gözden kaçırma!</b>"
-            )
+            if son_3_mail:
+                en_yeni_mail = son_3_mail[0]
+                klasor_adi = "Spam" if "Spam" in en_yeni_mail["klasor"] else "Inbox"
 
-        elif yeni_mail_bildirim_bitis and simdi < yeni_mail_bildirim_bitis:
-            await tum_kullanicilara_gonder(
-                context,
-                "📩 <b>Yeni ilgili mail geldi, gözden kaçırma!</b>"
-            )
+                mesaj = (
+                    f"📩 <b>Yeni mail geldi!</b>\n\n"
+                    f"📌 <b>Konu:</b> {en_yeni_mail['konu']}\n"
+                    f"👤 <b>Gönderen:</b> {en_yeni_mail['gonderen']}\n"
+                    f"📂 <b>Klasör:</b> {klasor_adi}\n"
+                    f"📝 <b>İçerik:</b> {en_yeni_mail['govde']}"
+                )
 
+                await tum_kullanicilara_gonder(context, mesaj)
+
+        # Son 3 değişmediyse 15 dakikada bir bilgi ver
         else:
             if (
                 son_yeni_mail_yok_mesaji is None
@@ -254,12 +245,11 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
                 )
                 son_yeni_mail_yok_mesaji = simdi
 
+        # Saatte 1 kez son 3 mail özeti
         bu_saat = simdi.replace(minute=0, second=0, microsecond=0)
 
         if son_saatlik_ozet != bu_saat:
             son_saatlik_ozet = bu_saat
-
-            son_3_mail = mailler[:3]
 
             if son_3_mail:
                 mesaj = "🕐 <b>Son 3 ilgili mail</b>\n\n"
@@ -282,14 +272,15 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
 
 # --- /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global son_3_mail_idleri
+
     chat_id = str(update.effective_chat.id)
     aktif_kullanicilar.add(chat_id)
 
     await update.message.reply_text("🚀 Mail takibi başlatıldı!")
 
     mailler = mailleri_getir()
-    for mail_item in mailler:
-        gonderilen_mailler.add(mail_item["id"])
+    son_3_mail_idleri = [mail_item["id"] for mail_item in mailler[:3]]
 
 
 # --- BOT BAŞLAT ---
@@ -301,7 +292,6 @@ app.add_handler(CommandHandler("start", start))
 
 # 60 saniyede bir çalışır
 app.job_queue.run_repeating(mail_kontrol, interval=60, first=10)
-app.job_queue.run_repeating(bot_canli, interval=60, first=5)
 
 print("🤖 Mail bot çalışıyor...")
 app.run_polling()
