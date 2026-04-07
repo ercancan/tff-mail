@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v3.4 STABLE LOOP"
+VERSION = "v3.5 MAIL HARDENED"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -24,6 +24,7 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 aktif_kullanicilar = {CHAT_ID}
 son_5_mail_idleri = []
 last_summary_time = None
+last_heartbeat_time = None
 alert_mode_until = None
 ilk_kurulum_tamamlandi = False
 
@@ -66,15 +67,12 @@ def decode_mime_text(value):
     if not value:
         return ""
 
-    parts = decode_header(value)
     sonuc = ""
-
-    for text, enc in parts:
+    for text, enc in decode_header(value):
         if isinstance(text, bytes):
             sonuc += text.decode(enc or "utf-8", errors="ignore")
         else:
             sonuc += text
-
     return sonuc.strip()
 
 
@@ -88,14 +86,11 @@ def imap_baglan():
 
 def html_to_text(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
-
     for tag in soup(["script", "style", "meta", "head", "title"]):
         tag.decompose()
-
     text = soup.get_text(separator="\n")
     text = re.sub(r"\n\s*\n+", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-
     return text.strip()
 
 
@@ -126,7 +121,6 @@ def govdeyi_al(msg):
 
             except Exception as e:
                 logging.warning(f"Mail body parse hatası: {e}")
-                continue
     else:
         try:
             payload = msg.get_payload(decode=True)
@@ -142,7 +136,6 @@ def govdeyi_al(msg):
             logging.warning(f"Tek parça mail parse hatası: {e}")
 
     govde = plain_text if plain_text else html_text
-
     if not govde:
         govde = "(İçerik yok)"
 
@@ -152,9 +145,7 @@ def govdeyi_al(msg):
 
 def ilgili_mail_mi(gonderen, konu, govde):
     tum = f"{gonderen} {konu} {govde}".lower()
-    kelime_eslesmesi = any(k in tum for k in ANAHTAR_KELIMELER)
-    ifade_eslesmesi = any(i in tum for i in ANAHTAR_IFADELER)
-    return kelime_eslesmesi or ifade_eslesmesi
+    return any(k in tum for k in ANAHTAR_KELIMELER) or any(i in tum for i in ANAHTAR_IFADELER)
 
 
 def mailleri_getir():
@@ -168,7 +159,6 @@ def mailleri_getir():
             try:
                 logging.info(f"Klasör kontrol ediliyor: {klasor}")
                 status, _ = mail.select(klasor, readonly=True)
-
                 if status != "OK":
                     logging.warning(f"Klasör seçilemedi: {klasor}")
                     continue
@@ -179,30 +169,33 @@ def mailleri_getir():
                     continue
 
                 uid_list = data[0].split()
-                logging.info(f"{klasor} içinde son {min(len(uid_list), 50)} mail taranacak")
+                logging.info(f"{klasor} içinde toplam {len(uid_list)} mail var, son {min(len(uid_list), 50)} taranacak")
 
                 for uid in uid_list[-50:]:
-                    status, msg_data = mail.uid("fetch", uid, "(RFC822)")
-                    if status != "OK" or not msg_data or not msg_data[0]:
-                        continue
+                    try:
+                        status, msg_data = mail.uid("fetch", uid, "(RFC822)")
+                        if status != "OK" or not msg_data or not msg_data[0]:
+                            continue
 
-                    raw = msg_data[0][1]
-                    msg = email.message_from_bytes(raw)
+                        raw = msg_data[0][1]
+                        msg = email.message_from_bytes(raw)
 
-                    konu = decode_mime_text(msg.get("Subject", ""))
-                    gonderen = decode_mime_text(msg.get("From", ""))
-                    govde = govdeyi_al(msg)
+                        konu = decode_mime_text(msg.get("Subject", ""))
+                        gonderen = decode_mime_text(msg.get("From", ""))
+                        govde = govdeyi_al(msg)
 
-                    if not ilgili_mail_mi(gonderen, konu, govde):
-                        continue
+                        if not ilgili_mail_mi(gonderen, konu, govde):
+                            continue
 
-                    bulunan.append({
-                        "id": f"{klasor}:{uid.decode()}",
-                        "konu": konu or "(Konu yok)",
-                        "gonderen": gonderen or "(Gönderen yok)",
-                        "govde": (govde or "(İçerik yok)")[:500],
-                        "klasor": klasor,
-                    })
+                        bulunan.append({
+                            "id": f"{klasor}:{uid.decode()}",
+                            "konu": konu or "(Konu yok)",
+                            "gonderen": gonderen or "(Gönderen yok)",
+                            "govde": (govde or "(İçerik yok)")[:500],
+                            "klasor": klasor,
+                        })
+                    except Exception as e:
+                        logging.warning(f"Tek mail işlenemedi ({klasor}:{uid}): {e}")
 
                 try:
                     mail.close()
@@ -227,19 +220,6 @@ def mailleri_getir():
     return bulunan
 
 
-async def gonder(application, mesaj):
-    for chat_id in aktif_kullanicilar:
-        try:
-            await application.bot.send_message(
-                chat_id=chat_id,
-                text=mesaj,
-                parse_mode="HTML",
-            )
-            logging.info(f"Telegram mesajı gönderildi: {chat_id}")
-        except Exception as e:
-            logging.exception(f"Telegram gönderim hatası ({chat_id}): {e}")
-
-
 def son_mail_basliklari(mailler, adet=3):
     secilen = mailler[:adet]
     if not secilen:
@@ -256,8 +236,22 @@ def son_mail_basliklari(mailler, adet=3):
     return "\n\n".join(satirlar)
 
 
+async def gonder(application, mesaj):
+    for chat_id in aktif_kullanicilar:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=mesaj,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            logging.info(f"Telegram mesajı gönderildi: {chat_id}")
+        except Exception as e:
+            logging.exception(f"Telegram gönderim hatası ({chat_id}): {e}")
+
+
 async def mail_kontrol(application):
-    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi
+    global son_5_mail_idleri, last_summary_time, last_heartbeat_time, alert_mode_until, ilk_kurulum_tamamlandi
 
     logging.info("Mail kontrol başladı")
 
@@ -276,10 +270,10 @@ async def mail_kontrol(application):
     son5 = mailler[:5]
     ids = [m["id"] for m in son5]
 
-    # İlk tur: sadece hafızaya al, bildirim spam'i yapma
     if not ilk_kurulum_tamamlandi:
         son_5_mail_idleri = ids.copy()
         last_summary_time = simdi
+        last_heartbeat_time = simdi
         ilk_kurulum_tamamlandi = True
         logging.info("İlk kurulum tamamlandı, mevcut mailler hafızaya alındı")
         return
@@ -299,17 +293,16 @@ async def mail_kontrol(application):
         await gonder(application, mesaj)
 
     if alert_mode_until and simdi < alert_mode_until:
-        mesaj = (
-            "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
-            f"{son_mail_basliklari(mailler, 5)}"
+        await gonder(
+            application,
+            "🚨 <b>SON 5 MAİL KONUSU</b>\n\n" + son_mail_basliklari(mailler, 5)
         )
-        await gonder(application, mesaj)
 
     if alert_mode_until and simdi >= alert_mode_until:
         alert_mode_until = None
         await gonder(application, "✅ <b>Alarm modu sona erdi</b>")
 
-    if last_summary_time and (simdi - last_summary_time).total_seconds() >= 900:
+    if last_summary_time is None or (simdi - last_summary_time).total_seconds() >= 900:
         inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
         spam = len([m for m in mailler if "Spam" in m["klasor"]])
 
@@ -321,10 +314,15 @@ async def mail_kontrol(application):
             f"📌 <b>Son 3 mail:</b>\n\n"
             f"{son_mail_basliklari(mailler, 3)}"
         )
-
         await gonder(application, mesaj)
         last_summary_time = simdi
         logging.info("15 dakikalık özet gönderildi")
+
+    # Opsiyonel heartbeat: botun yaşadığını anlamak için 30 dk'da bir
+    if last_heartbeat_time is None or (simdi - last_heartbeat_time).total_seconds() >= 1800:
+        await gonder(application, f"💓 <b>Bot çalışıyor</b>\nSürüm: {VERSION}")
+        last_heartbeat_time = simdi
+        logging.info("Heartbeat gönderildi")
 
     logging.info("Mail kontrol tamamlandı")
 
