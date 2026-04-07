@@ -2,6 +2,8 @@ import os
 import re
 import imaplib
 import email
+import logging
+import asyncio
 from email.header import decode_header
 from datetime import datetime, timedelta
 from flask import Flask
@@ -12,12 +14,12 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v2.6 ALERT MODE"
+VERSION = "v3.2 LAST3 + REFRESH FIX"
 
 TOKEN = os.getenv("TOKEN")
 
 # --- TELEGRAM ---
-CHAT_ID = "1292276069"
+CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
 
 # --- GMAIL ---
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
@@ -25,9 +27,14 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
 aktif_kullanicilar = {CHAT_ID}
 son_5_mail_idleri = []
-
 last_summary_time = datetime.now()
 alert_mode_until = None
+
+# --- LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
 # --- ANAHTAR KELİMELER ---
 ANAHTAR_KELIMELER = [
@@ -64,11 +71,9 @@ web_app = Flask(__name__)
 def home():
     return f"Mail bot çalışıyor - {VERSION}", 200
 
-
 def run_web():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
-
 
 # --- UTIL ---
 def decode_mime_text(value):
@@ -86,12 +91,12 @@ def decode_mime_text(value):
 
     return sonuc.strip()
 
-
 def imap_baglan():
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    logging.info("IMAP bağlantısı kuruluyor...")
+    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
     mail.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
+    logging.info("IMAP giriş başarılı")
     return mail
-
 
 def html_to_text(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -104,7 +109,6 @@ def html_to_text(html_content):
     text = re.sub(r"[ \t]+", " ", text)
 
     return text.strip()
-
 
 def govdeyi_al(msg):
     plain_text = ""
@@ -131,7 +135,8 @@ def govdeyi_al(msg):
                 elif content_type == "text/html" and not html_text:
                     html_text = html_to_text(decoded)
 
-            except Exception:
+            except Exception as e:
+                logging.warning(f"Mail body parse hatası: {e}")
                 continue
     else:
         try:
@@ -144,8 +149,8 @@ def govdeyi_al(msg):
                     html_text = html_to_text(decoded)
                 else:
                     plain_text = decoded
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Tek parça mail parse hatası: {e}")
 
     govde = plain_text if plain_text else html_text
 
@@ -155,15 +160,11 @@ def govdeyi_al(msg):
     govde = re.sub(r"\n\s*\n+", "\n\n", govde).strip()
     return govde
 
-
 def ilgili_mail_mi(gonderen, konu, govde):
     tum = f"{gonderen} {konu} {govde}".lower()
-
     kelime_eslesmesi = any(k in tum for k in ANAHTAR_KELIMELER)
     ifade_eslesmesi = any(i in tum for i in ANAHTAR_IFADELER)
-
     return kelime_eslesmesi or ifade_eslesmesi
-
 
 # --- MAIL GETİR ---
 def mailleri_getir():
@@ -175,15 +176,20 @@ def mailleri_getir():
 
         for klasor in ["INBOX", "[Gmail]/Spam"]:
             try:
+                logging.info(f"Klasör kontrol ediliyor: {klasor}")
                 status, _ = mail.select(klasor)
+
                 if status != "OK":
+                    logging.warning(f"Klasör seçilemedi: {klasor}")
                     continue
 
                 status, data = mail.uid("search", None, "ALL")
                 if status != "OK":
+                    logging.warning(f"UID search başarısız: {klasor}")
                     continue
 
                 uid_list = data[0].split()
+                logging.info(f"{klasor} içinde son {min(len(uid_list), 50)} mail taranacak")
 
                 for uid in uid_list[-50:]:
                     status, msg_data = mail.uid("fetch", uid, "(RFC822)")
@@ -208,8 +214,11 @@ def mailleri_getir():
                         "klasor": klasor,
                     })
 
-            except Exception:
-                continue
+            except Exception as e:
+                logging.exception(f"{klasor} klasör hatası: {e}")
+
+    except Exception as e:
+        logging.exception(f"Genel mail çekme hatası: {e}")
 
     finally:
         if mail is not None:
@@ -219,48 +228,67 @@ def mailleri_getir():
                 pass
 
     bulunan.reverse()
+    logging.info(f"Filtreye takılan mail sayısı: {len(bulunan)}")
     return bulunan
-
 
 # --- TELEGRAM ---
 async def gonder(context, mesaj):
     for chat_id in aktif_kullanicilar:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=mesaj,
-            parse_mode="HTML",
-        )
-
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=mesaj,
+                parse_mode="HTML",
+            )
+            logging.info(f"Telegram mesajı gönderildi: {chat_id}")
+        except Exception as e:
+            logging.exception(f"Telegram gönderim hatası ({chat_id}): {e}")
 
 # --- ANA KONTROL ---
 async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
     global son_5_mail_idleri, last_summary_time, alert_mode_until
 
     try:
-        mailler = mailleri_getir()
+        logging.info("Mail kontrol başladı")
+
+        mailler = await asyncio.to_thread(mailleri_getir)
         simdi = datetime.now()
 
         son5 = mailler[:5]
         ids = [m["id"] for m in son5]
 
-        # İlk açılışta sadece mevcut durumu hafızaya al
         if not son_5_mail_idleri:
             son_5_mail_idleri = ids.copy()
+            logging.info("İlk çalışma: mevcut son 5 mail hafızaya alındı")
 
-        # Yeni mail / değişim kontrolü
         yeni_mail_var = ids != son_5_mail_idleri
 
         if yeni_mail_var:
             son_5_mail_idleri = ids.copy()
             alert_mode_until = simdi + timedelta(minutes=10)
 
-            await gonder(
-                context,
-                "🚨 <b>Yeni mail algılandı</b>\n"
-                "⏱ <b>Alarm modu başladı:</b> 10 dakika boyunca her dakika son 5 konu gönderilecek."
+            son3 = mailler[:3]
+
+            mesaj = (
+                "🚨 <b>Yeni mail bildirimi</b>\n\n"
+                "📌 <b>Son 3 mail:</b>\n"
             )
 
-        # Alarm modu aktifse her dakika son 5 mail konusunu gönder
+            if son3:
+                for i, m in enumerate(son3, 1):
+                    klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+                    mesaj += (
+                        f"\n{i}. <b>{escape(m['konu'])}</b>\n"
+                        f"   👤 {escape(m['gonderen'])}\n"
+                        f"   📂 {escape(klasor)}\n"
+                    )
+            else:
+                mesaj += "\nMail bulunamadı."
+
+            mesaj += "\n⏱ <b>Alarm modu:</b> 10 dakika boyunca her dakika son 5 konu"
+
+            await gonder(context, mesaj)
+
         if alert_mode_until and simdi < alert_mode_until:
             if son5:
                 mesaj = "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
@@ -269,15 +297,11 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
                     mesaj += f"{i}. <b>{escape(m['konu'])}</b> <i>({escape(klasor)})</i>\n"
 
                 await gonder(context, mesaj)
-            else:
-                await gonder(context, "ℹ️ <b>Alarm modu aktif</b>\nAma filtreye uyan mail bulunamadı.")
 
-        # Alarm modu bittiyse kapat
         if alert_mode_until and simdi >= alert_mode_until:
             alert_mode_until = None
             await gonder(context, "✅ <b>Alarm modu sona erdi</b>")
 
-        # 15 dakikada bir genel özet
         if (simdi - last_summary_time).total_seconds() >= 900:
             inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
             spam = len([m for m in mailler if "Spam" in m["klasor"]])
@@ -287,43 +311,58 @@ async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
                 f"📊 <b>Mail Durum Özeti</b>\n\n"
                 f"📥 <b>Inbox:</b> {inbox}\n"
                 f"🚫 <b>Spam:</b> {spam}\n"
-                f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
-                f"🤖 Sistem aktif çalışıyor",
+                f"📦 <b>Toplam:</b> {len(mailler)}"
             )
 
             last_summary_time = simdi
+            logging.info("15 dakikalık özet gönderildi")
+
+        logging.info("Mail kontrol tamamlandı")
 
     except Exception as e:
-        await gonder(context, f"❌ <b>HATA:</b> {escape(str(e))}")
-
+        logging.exception(f"mail_kontrol hatası: {e}")
+        try:
+            await gonder(context, f"❌ <b>HATA:</b> {escape(str(e))}")
+        except Exception:
+            pass
 
 # --- KOMUTLAR ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 Başladı ({VERSION})")
 
-
 async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📌 Aktif sürüm: {VERSION}")
 
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Test mesajı geldi. Bot Telegram tarafında çalışıyor.")
 
 # --- BAŞLANGIÇ MESAJI ---
 async def baslangic_mesaji(app):
-    for chat_id in aktif_kullanicilar:
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text=f"🤖 Bot aktif ({VERSION})",
-        )
-
+    try:
+        for chat_id in aktif_kullanicilar:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"🤖 Bot aktif ({VERSION})"
+            )
+        logging.info("Başlangıç mesajı gönderildi")
+    except Exception as e:
+        logging.exception(f"Başlangıç mesajı hatası: {e}")
 
 # --- BAŞLAT ---
 Thread(target=run_web, daemon=True).start()
 
-app = ApplicationBuilder().token(TOKEN).build()
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(baslangic_mesaji)
+    .build()
+)
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("version", version))
+app.add_handler(CommandHandler("test", test))
 
 app.job_queue.run_repeating(mail_kontrol, interval=60, first=10)
-app.post_init = baslangic_mesaji
 
-print(f"BOT BAŞLADI - {VERSION}")
+logging.info(f"BOT BAŞLADI - {VERSION}")
 app.run_polling()
