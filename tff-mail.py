@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from html import escape
 from bs4 import BeautifulSoup
 
-VERSION = "v5.0 NO POLLING STABLE"
+VERSION = "v6.0 NO POLLING STABLE"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
