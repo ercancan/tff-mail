@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "v4.0 THREAD LOOP STABLE"
+VERSION = "v4.1 THREAD LOOP + SUMMARY SUBJECTS"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
