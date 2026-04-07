@@ -12,10 +12,7 @@ from datetime import datetime, timedelta
 from html import escape
 from bs4 import BeautifulSoup
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-VERSION = "v4.1 THREAD LOOP + SUMMARY SUBJECTS"
+VERSION = "v5.0 NO POLLING STABLE"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -74,7 +71,7 @@ def telegram_mesaj_gonder(mesaj):
                 data={
                     "chat_id": chat_id,
                     "text": mesaj,
-                    "parse_mode": "HTML"
+                    "parse_mode": "HTML",
                 },
                 timeout=20
             )
@@ -346,31 +343,10 @@ def surekli_mail_dongusu():
         time.sleep(60)
 
 
-# --- TELEGRAM KOMUTLARI ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🚀 Başladı ({VERSION})")
-
-
-async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"📌 Aktif sürüm: {VERSION}")
-
-
-async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Test mesajı geldi. Bot Telegram tarafında çalışıyor.")
-
-
 def main():
-    worker_thread = threading.Thread(target=surekli_mail_dongusu, daemon=True)
+    worker_thread = threading.Thread(target=surekli_mail_dongusu, daemon=False)
     worker_thread.start()
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("version", version))
-    app.add_handler(CommandHandler("test", test))
-
-    logging.info(f"BOT BAŞLADI - {VERSION}")
-    app.run_polling(drop_pending_updates=True)
+    worker_thread.join()
 
 
 if __name__ == "__main__":
