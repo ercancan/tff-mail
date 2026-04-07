@@ -4,6 +4,7 @@ import imaplib
 import email
 import logging
 import asyncio
+import socket
 from email.header import decode_header
 from datetime import datetime, timedelta
 from html import escape
@@ -12,7 +13,7 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-VERSION = "__v3.3 WORKER LOOP FIX"
+VERSION = "v3.4 STABLE LOOP"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -22,8 +23,11 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
 aktif_kullanicilar = {CHAT_ID}
 son_5_mail_idleri = []
-last_summary_time = datetime.now()
+last_summary_time = None
 alert_mode_until = None
+ilk_kurulum_tamamlandi = False
+
+socket.setdefaulttimeout(30)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,7 +167,7 @@ def mailleri_getir():
         for klasor in ["INBOX", "[Gmail]/Spam"]:
             try:
                 logging.info(f"Klasör kontrol ediliyor: {klasor}")
-                status, _ = mail.select(klasor)
+                status, _ = mail.select(klasor, readonly=True)
 
                 if status != "OK":
                     logging.warning(f"Klasör seçilemedi: {klasor}")
@@ -200,6 +204,11 @@ def mailleri_getir():
                         "klasor": klasor,
                     })
 
+                try:
+                    mail.close()
+                except Exception:
+                    pass
+
             except Exception as e:
                 logging.exception(f"{klasor} klasör hatası: {e}")
 
@@ -231,82 +240,93 @@ async def gonder(application, mesaj):
             logging.exception(f"Telegram gönderim hatası ({chat_id}): {e}")
 
 
+def son_mail_basliklari(mailler, adet=3):
+    secilen = mailler[:adet]
+    if not secilen:
+        return "Mail bulunamadı."
+
+    satirlar = []
+    for i, m in enumerate(secilen, 1):
+        klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
+        satirlar.append(
+            f"{i}. <b>{escape(m['konu'])}</b>\n"
+            f"   👤 {escape(m['gonderen'])}\n"
+            f"   📂 {escape(klasor)}"
+        )
+    return "\n\n".join(satirlar)
+
+
 async def mail_kontrol(application):
-    global son_5_mail_idleri, last_summary_time, alert_mode_until
+    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi
+
+    logging.info("Mail kontrol başladı")
 
     try:
-        logging.info("Mail kontrol başladı")
-
-        mailler = await asyncio.to_thread(mailleri_getir)
-        simdi = datetime.now()
-
-        son5 = mailler[:5]
-        ids = [m["id"] for m in son5]
-
-        if not son_5_mail_idleri:
-            son_5_mail_idleri = ids.copy()
-            logging.info("İlk çalışma: mevcut son 5 mail hafızaya alındı")
-
-        yeni_mail_var = ids != son_5_mail_idleri
-
-        if yeni_mail_var:
-            son_5_mail_idleri = ids.copy()
-            alert_mode_until = simdi + timedelta(minutes=10)
-
-            son3 = mailler[:3]
-            mesaj = "🚨 <b>Yeni mail bildirimi</b>\n\n📌 <b>Son 3 mail:</b>\n"
-
-            if son3:
-                for i, m in enumerate(son3, 1):
-                    klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
-                    mesaj += (
-                        f"\n{i}. <b>{escape(m['konu'])}</b>\n"
-                        f"   👤 {escape(m['gonderen'])}\n"
-                        f"   📂 {escape(klasor)}\n"
-                    )
-            else:
-                mesaj += "\nMail bulunamadı."
-
-            mesaj += "\n⏱ <b>Alarm modu:</b> 10 dakika boyunca her dakika son 5 konu"
-
-            await gonder(application, mesaj)
-
-        if alert_mode_until and simdi < alert_mode_until:
-            if son5:
-                mesaj = "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
-                for i, m in enumerate(son5, 1):
-                    klasor = "Spam" if "Spam" in m["klasor"] else "Inbox"
-                    mesaj += f"{i}. <b>{escape(m['konu'])}</b> <i>({escape(klasor)})</i>\n"
-
-                await gonder(application, mesaj)
-
-        if alert_mode_until and simdi >= alert_mode_until:
-            alert_mode_until = None
-            await gonder(application, "✅ <b>Alarm modu sona erdi</b>")
-
-        if (simdi - last_summary_time).total_seconds() >= 900:
-            inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
-            spam = len([m for m in mailler if "Spam" in m["klasor"]])
-
-            await gonder(
-                application,
-                f"📊 <b>Mail Durum Özeti</b>\n\n"
-                f"📥 <b>Inbox:</b> {inbox}\n"
-                f"🚫 <b>Spam:</b> {spam}\n"
-                f"📦 <b>Toplam:</b> {len(mailler)}"
-            )
-
-            last_summary_time = simdi
-            logging.info("15 dakikalık özet gönderildi")
-
-        logging.info("Mail kontrol tamamlandı")
-
+        mailler = await asyncio.wait_for(asyncio.to_thread(mailleri_getir), timeout=45)
+    except asyncio.TimeoutError:
+        logging.error("Mail çekme timeout oldu")
+        await gonder(application, "⚠️ <b>Mail kontrol timeout oldu</b>\nBir sonraki turda tekrar denenecek.")
+        return
     except Exception as e:
-        logging.exception(f"mail_kontrol hatası: {e}")
-        try:
-            await gonder(application, f"❌ <b>HATA:</b> {escape(str(e))}")
-        except Exception:
-            pass
+        logging.exception(f"Mail çekme hatası: {e}")
+        await gonder(application, f"❌ <b>Mail çekme hatası:</b> {escape(str(e))}")
+        return
+
+    simdi = datetime.now()
+    son5 = mailler[:5]
+    ids = [m["id"] for m in son5]
+
+    # İlk tur: sadece hafızaya al, bildirim spam'i yapma
+    if not ilk_kurulum_tamamlandi:
+        son_5_mail_idleri = ids.copy()
+        last_summary_time = simdi
+        ilk_kurulum_tamamlandi = True
+        logging.info("İlk kurulum tamamlandı, mevcut mailler hafızaya alındı")
+        return
+
+    yeni_mail_var = ids != son_5_mail_idleri
+
+    if yeni_mail_var:
+        son_5_mail_idleri = ids.copy()
+        alert_mode_until = simdi + timedelta(minutes=10)
+
+        mesaj = (
+            "🚨 <b>Yeni mail bildirimi</b>\n\n"
+            "📌 <b>Son 3 mail:</b>\n\n"
+            f"{son_mail_basliklari(mailler, 3)}\n\n"
+            "⏱ <b>Alarm modu:</b> 10 dakika boyunca her dakika son 5 konu"
+        )
+        await gonder(application, mesaj)
+
+    if alert_mode_until and simdi < alert_mode_until:
+        mesaj = (
+            "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
+            f"{son_mail_basliklari(mailler, 5)}"
+        )
+        await gonder(application, mesaj)
+
+    if alert_mode_until and simdi >= alert_mode_until:
+        alert_mode_until = None
+        await gonder(application, "✅ <b>Alarm modu sona erdi</b>")
+
+    if last_summary_time and (simdi - last_summary_time).total_seconds() >= 900:
+        inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
+        spam = len([m for m in mailler if "Spam" in m["klasor"]])
+
+        mesaj = (
+            f"📊 <b>Mail Durum Özeti</b>\n\n"
+            f"📥 <b>Inbox:</b> {inbox}\n"
+            f"🚫 <b>Spam:</b> {spam}\n"
+            f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
+            f"📌 <b>Son 3 mail:</b>\n\n"
+            f"{son_mail_basliklari(mailler, 3)}"
+        )
+
+        await gonder(application, mesaj)
+        last_summary_time = simdi
+        logging.info("15 dakikalık özet gönderildi")
+
+    logging.info("Mail kontrol tamamlandı")
 
 
 async def surekli_mail_dongusu(application):
@@ -319,6 +339,7 @@ async def surekli_mail_dongusu(application):
         except Exception as e:
             logging.exception(f"Döngü içi kritik hata: {e}")
 
+        logging.info("60 saniye bekleniyor...")
         await asyncio.sleep(60)
 
 
