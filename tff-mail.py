@@ -13,7 +13,7 @@ from html import escape
 from bs4 import BeautifulSoup
 from flask import Flask
 
-VERSION = "v6.1 WEB KEEPALIVE"
+VERSION = "v6.2 MINUTE ALIGNED LOOP"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -356,6 +356,17 @@ def mail_kontrol():
     logging.info("Mail kontrol tamamlandı")
 
 
+def bir_sonraki_dakikayi_bekle():
+    now = datetime.now()
+    kalan_saniye = 60 - now.second
+
+    if kalan_saniye <= 0:
+        kalan_saniye = 60
+
+    logging.info(f"Bir sonraki dakikaya kadar {kalan_saniye} saniye bekleniyor...")
+    time.sleep(kalan_saniye)
+
+
 def surekli_mail_dongusu():
     telegram_mesaj_gonder(f"🤖 Bot aktif ({VERSION})")
     logging.info("Sürekli mail döngüsü başlatıldı")
@@ -366,8 +377,7 @@ def surekli_mail_dongusu():
         except Exception as e:
             logging.exception(f"Döngü içi kritik hata: {e}")
 
-        logging.info("60 saniye bekleniyor...")
-        time.sleep(60)
+        bir_sonraki_dakikayi_bekle()
 
 
 def main():
