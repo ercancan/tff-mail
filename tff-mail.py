@@ -11,8 +11,9 @@ from email.header import decode_header
 from datetime import datetime, timedelta
 from html import escape
 from bs4 import BeautifulSoup
+from flask import Flask
 
-VERSION = "v6.0 NO POLLING STABLE"
+VERSION = "v6.1 WEB KEEPALIVE"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -59,6 +60,18 @@ ANAHTAR_IFADELER = [
     "verification code",
     "security code",
 ]
+
+# --- WEB KEEP ALIVE ---
+web_app = Flask(__name__)
+
+@web_app.route("/")
+def home():
+    return f"Bot is alive - {VERSION}", 200
+
+def run_web():
+    port = int(os.getenv("PORT", "10000"))
+    logging.info(f"Web server başlatılıyor. Port: {port}")
+    web_app.run(host="0.0.0.0", port=port)
 
 
 def telegram_mesaj_gonder(mesaj):
@@ -281,7 +294,21 @@ def mail_kontrol():
         son_5_mail_idleri = ids.copy()
         last_summary_time = simdi
         ilk_kurulum_tamamlandi = True
-        logging.info("İlk kurulum tamamlandı, mevcut mailler hafızaya alındı")
+
+        inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
+        spam = len([m for m in mailler if "Spam" in m["klasor"]])
+
+        mesaj = (
+            f"✅ <b>Bot ilk kontrolü tamamladı</b>\n\n"
+            f"📥 <b>Inbox:</b> {inbox}\n"
+            f"🚫 <b>Spam:</b> {spam}\n"
+            f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
+            f"📌 <b>Son 3 mail:</b>\n\n"
+            f"{son_mail_basliklari(mailler, 3)}"
+        )
+
+        telegram_mesaj_gonder(mesaj)
+        logging.info("İlk açılış özeti gönderildi")
         return
 
     yeni_mail_var = ids != son_5_mail_idleri
@@ -344,9 +371,14 @@ def surekli_mail_dongusu():
 
 
 def main():
-    worker_thread = threading.Thread(target=surekli_mail_dongusu, daemon=False)
+    worker_thread = threading.Thread(target=surekli_mail_dongusu, daemon=True)
+    web_thread = threading.Thread(target=run_web, daemon=True)
+
     worker_thread.start()
+    web_thread.start()
+
     worker_thread.join()
+    web_thread.join()
 
 
 if __name__ == "__main__":
