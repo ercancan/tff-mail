@@ -13,7 +13,11 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+<<<<<<< HEAD
 VERSION = "v3.5 MAIL HARDENED"
+=======
+VERSION = "v3.4 STABLE LOOP"
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -24,7 +28,10 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 aktif_kullanicilar = {CHAT_ID}
 son_5_mail_idleri = []
 last_summary_time = None
+<<<<<<< HEAD
 last_heartbeat_time = None
+=======
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 alert_mode_until = None
 ilk_kurulum_tamamlandi = False
 
@@ -121,6 +128,10 @@ def govdeyi_al(msg):
 
             except Exception as e:
                 logging.warning(f"Mail body parse hatası: {e}")
+<<<<<<< HEAD
+=======
+                continue
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
     else:
         try:
             payload = msg.get_payload(decode=True)
@@ -145,7 +156,13 @@ def govdeyi_al(msg):
 
 def ilgili_mail_mi(gonderen, konu, govde):
     tum = f"{gonderen} {konu} {govde}".lower()
+<<<<<<< HEAD
     return any(k in tum for k in ANAHTAR_KELIMELER) or any(i in tum for i in ANAHTAR_IFADELER)
+=======
+    kelime_eslesmesi = any(k in tum for k in ANAHTAR_KELIMELER)
+    ifade_eslesmesi = any(i in tum for i in ANAHTAR_IFADELER)
+    return kelime_eslesmesi or ifade_eslesmesi
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 
 
 def mailleri_getir():
@@ -159,6 +176,10 @@ def mailleri_getir():
             try:
                 logging.info(f"Klasör kontrol ediliyor: {klasor}")
                 status, _ = mail.select(klasor, readonly=True)
+<<<<<<< HEAD
+=======
+
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
                 if status != "OK":
                     logging.warning(f"Klasör seçilemedi: {klasor}")
                     continue
@@ -169,7 +190,11 @@ def mailleri_getir():
                     continue
 
                 uid_list = data[0].split()
+<<<<<<< HEAD
                 logging.info(f"{klasor} içinde toplam {len(uid_list)} mail var, son {min(len(uid_list), 50)} taranacak")
+=======
+                logging.info(f"{klasor} içinde son {min(len(uid_list), 50)} mail taranacak")
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 
                 for uid in uid_list[-50:]:
                     try:
@@ -220,6 +245,22 @@ def mailleri_getir():
     return bulunan
 
 
+<<<<<<< HEAD
+=======
+async def gonder(application, mesaj):
+    for chat_id in aktif_kullanicilar:
+        try:
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=mesaj,
+                parse_mode="HTML",
+            )
+            logging.info(f"Telegram mesajı gönderildi: {chat_id}")
+        except Exception as e:
+            logging.exception(f"Telegram gönderim hatası ({chat_id}): {e}")
+
+
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 def son_mail_basliklari(mailler, adet=3):
     secilen = mailler[:adet]
     if not secilen:
@@ -236,6 +277,7 @@ def son_mail_basliklari(mailler, adet=3):
     return "\n\n".join(satirlar)
 
 
+<<<<<<< HEAD
 async def gonder(application, mesaj):
     for chat_id in aktif_kullanicilar:
         try:
@@ -252,6 +294,10 @@ async def gonder(application, mesaj):
 
 async def mail_kontrol(application):
     global son_5_mail_idleri, last_summary_time, last_heartbeat_time, alert_mode_until, ilk_kurulum_tamamlandi
+=======
+async def mail_kontrol(application):
+    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 
     logging.info("Mail kontrol başladı")
 
@@ -270,10 +316,17 @@ async def mail_kontrol(application):
     son5 = mailler[:5]
     ids = [m["id"] for m in son5]
 
+<<<<<<< HEAD
     if not ilk_kurulum_tamamlandi:
         son_5_mail_idleri = ids.copy()
         last_summary_time = simdi
         last_heartbeat_time = simdi
+=======
+    # İlk tur: sadece hafızaya al, bildirim spam'i yapma
+    if not ilk_kurulum_tamamlandi:
+        son_5_mail_idleri = ids.copy()
+        last_summary_time = simdi
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
         ilk_kurulum_tamamlandi = True
         logging.info("İlk kurulum tamamlandı, mevcut mailler hafızaya alındı")
         return
@@ -293,16 +346,28 @@ async def mail_kontrol(application):
         await gonder(application, mesaj)
 
     if alert_mode_until and simdi < alert_mode_until:
+<<<<<<< HEAD
         await gonder(
             application,
             "🚨 <b>SON 5 MAİL KONUSU</b>\n\n" + son_mail_basliklari(mailler, 5)
         )
+=======
+        mesaj = (
+            "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
+            f"{son_mail_basliklari(mailler, 5)}"
+        )
+        await gonder(application, mesaj)
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
 
     if alert_mode_until and simdi >= alert_mode_until:
         alert_mode_until = None
         await gonder(application, "✅ <b>Alarm modu sona erdi</b>")
 
+<<<<<<< HEAD
     if last_summary_time is None or (simdi - last_summary_time).total_seconds() >= 900:
+=======
+    if last_summary_time and (simdi - last_summary_time).total_seconds() >= 900:
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
         inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
         spam = len([m for m in mailler if "Spam" in m["klasor"]])
 
@@ -314,16 +379,23 @@ async def mail_kontrol(application):
             f"📌 <b>Son 3 mail:</b>\n\n"
             f"{son_mail_basliklari(mailler, 3)}"
         )
+<<<<<<< HEAD
+=======
+
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
         await gonder(application, mesaj)
         last_summary_time = simdi
         logging.info("15 dakikalık özet gönderildi")
 
+<<<<<<< HEAD
     # Opsiyonel heartbeat: botun yaşadığını anlamak için 30 dk'da bir
     if last_heartbeat_time is None or (simdi - last_heartbeat_time).total_seconds() >= 1800:
         await gonder(application, f"💓 <b>Bot çalışıyor</b>\nSürüm: {VERSION}")
         last_heartbeat_time = simdi
         logging.info("Heartbeat gönderildi")
 
+=======
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
     logging.info("Mail kontrol tamamlandı")
 
 
@@ -375,4 +447,8 @@ def main():
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main()
+=======
+    main()
+>>>>>>> d84bb075fc11d7d676eebfc9ae7de8ce380a9fe3
