@@ -1,6 +1,6 @@
 import os
-import re
 import time
+import re
 import socket
 import imaplib
 import email
@@ -11,9 +11,9 @@ from email.header import decode_header
 from datetime import datetime, timedelta
 from html import escape
 from bs4 import BeautifulSoup
-from flask import Flask
+from flask import Flask, request, jsonify
 
-VERSION = "v6.2 MINUTE ALIGNED LOOP"
+VERSION = "v7.0 CRON TRIGGER FINAL"
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
@@ -21,11 +21,15 @@ CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
+# Güvenlik için cron çağrısında kullanılacak gizli anahtar
+CRON_SECRET = os.getenv("CRON_SECRET", "degistir-bunu-123")
+
 aktif_kullanicilar = {CHAT_ID}
 son_5_mail_idleri = []
 last_summary_time = None
 alert_mode_until = None
 ilk_kurulum_tamamlandi = False
+last_ping_time = None
 
 socket.setdefaulttimeout(30)
 
@@ -61,17 +65,7 @@ ANAHTAR_IFADELER = [
     "security code",
 ]
 
-# --- WEB KEEP ALIVE ---
 web_app = Flask(__name__)
-
-@web_app.route("/")
-def home():
-    return f"Bot is alive - {VERSION}", 200
-
-def run_web():
-    port = int(os.getenv("PORT", "10000"))
-    logging.info(f"Web server başlatılıyor. Port: {port}")
-    web_app.run(host="0.0.0.0", port=port)
 
 
 def telegram_mesaj_gonder(mesaj):
@@ -275,7 +269,7 @@ def son_mail_basliklari(mailler, adet=3):
 
 
 def mail_kontrol():
-    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi
+    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi, last_ping_time
 
     logging.info("Mail kontrol başladı")
 
@@ -284,7 +278,7 @@ def mail_kontrol():
     except Exception as e:
         logging.exception(f"Mail çekme hatası: {e}")
         telegram_mesaj_gonder(f"❌ <b>Mail çekme hatası:</b> {escape(str(e))}")
-        return
+        return {"ok": False, "error": str(e)}
 
     simdi = datetime.now()
     son5 = mailler[:5]
@@ -293,6 +287,7 @@ def mail_kontrol():
     if not ilk_kurulum_tamamlandi:
         son_5_mail_idleri = ids.copy()
         last_summary_time = simdi
+        last_ping_time = simdi
         ilk_kurulum_tamamlandi = True
 
         inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
@@ -306,10 +301,9 @@ def mail_kontrol():
             f"📌 <b>Son 3 mail:</b>\n\n"
             f"{son_mail_basliklari(mailler, 3)}"
         )
-
         telegram_mesaj_gonder(mesaj)
         logging.info("İlk açılış özeti gönderildi")
-        return
+        return {"ok": True, "message": "initial_check_done", "count": len(mailler)}
 
     yeni_mail_var = ids != son_5_mail_idleri
 
@@ -348,47 +342,47 @@ def mail_kontrol():
             f"📌 <b>Son 3 mail:</b>\n\n"
             f"{son_mail_basliklari(mailler, 3)}"
         )
-
         telegram_mesaj_gonder(mesaj)
         last_summary_time = simdi
         logging.info("15 dakikalık özet gönderildi")
 
+    # 5 dakikada bir heartbeat
+    if last_ping_time and (simdi - last_ping_time).total_seconds() >= 300:
+        telegram_mesaj_gonder(f"⚙️ <b>Bot çalışıyor</b>\n🕒 Son kontrol: {simdi.strftime('%H:%M:%S')}")
+        last_ping_time = simdi
+        logging.info("Heartbeat gönderildi")
+
     logging.info("Mail kontrol tamamlandı")
+    return {"ok": True, "message": "check_done", "count": len(mailler)}
 
 
-def bir_sonraki_dakikayi_bekle():
-    now = datetime.now()
-    kalan_saniye = 60 - now.second
-
-    if kalan_saniye <= 0:
-        kalan_saniye = 60
-
-    logging.info(f"Bir sonraki dakikaya kadar {kalan_saniye} saniye bekleniyor...")
-    time.sleep(kalan_saniye)
+@web_app.route("/")
+def home():
+    return f"Bot is alive - {VERSION}", 200
 
 
-def surekli_mail_dongusu():
+@web_app.route("/check", methods=["GET"])
+def check_route():
+    secret = request.args.get("key", "")
+    if secret != CRON_SECRET:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    result = mail_kontrol()
+    return jsonify(result), 200
+
+
+def startup_message():
+    time.sleep(5)
     telegram_mesaj_gonder(f"🤖 Bot aktif ({VERSION})")
-    logging.info("Sürekli mail döngüsü başlatıldı")
-
-    while True:
-        try:
-            mail_kontrol()
-        except Exception as e:
-            logging.exception(f"Döngü içi kritik hata: {e}")
-
-        bir_sonraki_dakikayi_bekle()
+    logging.info("Başlangıç mesajı gönderildi")
 
 
 def main():
-    worker_thread = threading.Thread(target=surekli_mail_dongusu, daemon=True)
-    web_thread = threading.Thread(target=run_web, daemon=True)
+    threading.Thread(target=startup_message, daemon=True).start()
 
-    worker_thread.start()
-    web_thread.start()
-
-    worker_thread.join()
-    web_thread.join()
+    port = int(os.getenv("PORT", "10000"))
+    logging.info(f"Web server başlatılıyor. Port: {port}")
+    web_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
