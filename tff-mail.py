@@ -1,43 +1,45 @@
 import os
-import time
 import re
-import socket
 import imaplib
 import email
 import logging
-import threading
-import requests
 from email.header import decode_header
 from datetime import datetime, timedelta
 from html import escape
-from bs4 import BeautifulSoup
-from flask import Flask, request, jsonify
+from threading import Thread
 
-VERSION = "v7.0 CRON TRIGGER FINAL"
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+VERSION = "v8.0 MAIL BOT FINAL"
 
 TOKEN = os.getenv("TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID", "1292276069"))
 
+# --- TELEGRAM ---
+CHAT_ID = "1292276069"
+
+# --- GMAIL ---
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 
-# Güvenlik için cron çağrısında kullanılacak gizli anahtar
-CRON_SECRET = os.getenv("CRON_SECRET", "degistir-bunu-123")
-
 aktif_kullanicilar = {CHAT_ID}
+
+# --- STATE ---
 son_5_mail_idleri = []
-last_summary_time = None
-alert_mode_until = None
+son_ozet_zamani = None
+alarm_bitis_zamani = None
 ilk_kurulum_tamamlandi = False
-last_ping_time = None
 
-socket.setdefaulttimeout(30)
-
+# --- LOGGING ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
+# --- FILTRELER ---
 ANAHTAR_KELIMELER = [
     "tff",
     "fifa",
@@ -46,13 +48,8 @@ ANAHTAR_KELIMELER = [
     "futbol",
     "federasyon",
     "taraftar",
-    "milli",
-    "takım",
-    "takim",
-    "taraftarkulubu",
-    "taraftar kulubu",
-    "kırmızı",
-    "kirmizi",
+    "milli takım",
+    "milli takim",
     "bilet",
     "kupa",
     "dünya",
@@ -65,28 +62,20 @@ ANAHTAR_IFADELER = [
     "security code",
 ]
 
+# --- WEB KEEPALIVE ---
 web_app = Flask(__name__)
 
-
-def telegram_mesaj_gonder(mesaj):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-
-    for chat_id in aktif_kullanicilar:
-        try:
-            response = requests.post(
-                url,
-                data={
-                    "chat_id": chat_id,
-                    "text": mesaj,
-                    "parse_mode": "HTML",
-                },
-                timeout=20
-            )
-            logging.info(f"Telegram mesaj gönderildi: {chat_id} | status={response.status_code}")
-        except Exception as e:
-            logging.exception(f"Telegram mesaj gönderim hatası ({chat_id}): {e}")
+@web_app.route("/")
+def home():
+    return f"Mail bot çalışıyor - {VERSION}", 200
 
 
+def run_web():
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+
+# --- UTIL ---
 def decode_mime_text(value):
     if not value:
         return ""
@@ -104,10 +93,8 @@ def decode_mime_text(value):
 
 
 def imap_baglan():
-    logging.info("IMAP bağlantısı kuruluyor...")
-    mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
+    mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
-    logging.info("IMAP giriş başarılı")
     return mail
 
 
@@ -120,7 +107,6 @@ def html_to_text(html_content):
     text = soup.get_text(separator="\n")
     text = re.sub(r"\n\s*\n+", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
-
     return text.strip()
 
 
@@ -149,8 +135,7 @@ def govdeyi_al(msg):
                 elif content_type == "text/html" and not html_text:
                     html_text = html_to_text(decoded)
 
-            except Exception as e:
-                logging.warning(f"Mail body parse hatası: {e}")
+            except Exception:
                 continue
     else:
         try:
@@ -163,8 +148,8 @@ def govdeyi_al(msg):
                     html_text = html_to_text(decoded)
                 else:
                     plain_text = decoded
-        except Exception as e:
-            logging.warning(f"Tek parça mail parse hatası: {e}")
+        except Exception:
+            pass
 
     govde = plain_text if plain_text else html_text
 
@@ -177,8 +162,10 @@ def govdeyi_al(msg):
 
 def ilgili_mail_mi(gonderen, konu, govde):
     tum = f"{gonderen} {konu} {govde}".lower()
+
     kelime_eslesmesi = any(k in tum for k in ANAHTAR_KELIMELER)
     ifade_eslesmesi = any(i in tum for i in ANAHTAR_IFADELER)
+
     return kelime_eslesmesi or ifade_eslesmesi
 
 
@@ -254,6 +241,7 @@ def mailleri_getir():
 
 def son_mail_basliklari(mailler, adet=3):
     secilen = mailler[:adet]
+
     if not secilen:
         return "Mail bulunamadı."
 
@@ -265,125 +253,139 @@ def son_mail_basliklari(mailler, adet=3):
             f"   👤 {escape(m['gonderen'])}\n"
             f"   📂 {escape(klasor)}"
         )
+
     return "\n\n".join(satirlar)
 
 
-def mail_kontrol():
-    global son_5_mail_idleri, last_summary_time, alert_mode_until, ilk_kurulum_tamamlandi, last_ping_time
+async def tum_kullanicilara_gonder(context, mesaj):
+    for chat_id in aktif_kullanicilar:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=mesaj,
+            parse_mode="HTML"
+        )
 
-    logging.info("Mail kontrol başladı")
+
+# --- MAIL KONTROL ---
+async def mail_kontrol(context: ContextTypes.DEFAULT_TYPE):
+    global son_5_mail_idleri
+    global son_ozet_zamani
+    global alarm_bitis_zamani
+    global ilk_kurulum_tamamlandi
 
     try:
+        simdi = datetime.now()
         mailler = mailleri_getir()
+
+        son5 = mailler[:5]
+        ids = [m["id"] for m in son5]
+
+        # İlk açılışta mevcut durumu hafızaya al
+        if not ilk_kurulum_tamamlandi:
+            son_5_mail_idleri = ids.copy()
+            son_ozet_zamani = simdi
+            ilk_kurulum_tamamlandi = True
+
+            inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
+            spam = len([m for m in mailler if "Spam" in m["klasor"]])
+
+            mesaj = (
+                f"✅ <b>Bot ilk kontrolü tamamladı</b>\n\n"
+                f"📥 <b>Inbox:</b> {inbox}\n"
+                f"🚫 <b>Spam:</b> {spam}\n"
+                f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
+                f"📌 <b>Son 3 mail:</b>\n\n"
+                f"{son_mail_basliklari(mailler, 3)}"
+            )
+
+            await tum_kullanicilara_gonder(context, mesaj)
+            logging.info("İlk açılış özeti gönderildi")
+            return
+
+        yeni_mail_var = ids != son_5_mail_idleri
+
+        # Yeni mail gelirse alarm başlat
+        if yeni_mail_var:
+            son_5_mail_idleri = ids.copy()
+            alarm_bitis_zamani = simdi + timedelta(minutes=10)
+
+            mesaj = (
+                "🚨 <b>Yeni mail bildirimi</b>\n\n"
+                "📌 <b>Son 3 mail:</b>\n\n"
+                f"{son_mail_basliklari(mailler, 3)}\n\n"
+                "⏱ <b>Alarm modu:</b> 10 dakika boyunca her dakika son 5 konu"
+            )
+            await tum_kullanicilara_gonder(context, mesaj)
+
+        # Alarm süresince her dakika son 5 mail
+        elif alarm_bitis_zamani and simdi < alarm_bitis_zamani:
+            mesaj = (
+                "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
+                f"{son_mail_basliklari(mailler, 5)}"
+            )
+            await tum_kullanicilara_gonder(context, mesaj)
+
+        # Alarm bitti
+        elif alarm_bitis_zamani and simdi >= alarm_bitis_zamani:
+            alarm_bitis_zamani = None
+            await tum_kullanicilara_gonder(context, "✅ <b>Alarm modu sona erdi</b>")
+
+        # 15 dakikada bir özet
+        if (
+            son_ozet_zamani is None
+            or (simdi - son_ozet_zamani) >= timedelta(minutes=15)
+        ):
+            inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
+            spam = len([m for m in mailler if "Spam" in m["klasor"]])
+
+            mesaj = (
+                f"📊 <b>Mail Durum Özeti</b>\n\n"
+                f"📥 <b>Inbox:</b> {inbox}\n"
+                f"🚫 <b>Spam:</b> {spam}\n"
+                f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
+                f"📌 <b>Son 3 mail:</b>\n\n"
+                f"{son_mail_basliklari(mailler, 3)}"
+            )
+
+            await tum_kullanicilara_gonder(context, mesaj)
+            son_ozet_zamani = simdi
+            logging.info("15 dakikalık özet gönderildi")
+
     except Exception as e:
-        logging.exception(f"Mail çekme hatası: {e}")
-        telegram_mesaj_gonder(f"❌ <b>Mail çekme hatası:</b> {escape(str(e))}")
-        return {"ok": False, "error": str(e)}
-
-    simdi = datetime.now()
-    son5 = mailler[:5]
-    ids = [m["id"] for m in son5]
-
-    if not ilk_kurulum_tamamlandi:
-        son_5_mail_idleri = ids.copy()
-        last_summary_time = simdi
-        last_ping_time = simdi
-        ilk_kurulum_tamamlandi = True
-
-        inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
-        spam = len([m for m in mailler if "Spam" in m["klasor"]])
-
-        mesaj = (
-            f"✅ <b>Bot ilk kontrolü tamamladı</b>\n\n"
-            f"📥 <b>Inbox:</b> {inbox}\n"
-            f"🚫 <b>Spam:</b> {spam}\n"
-            f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
-            f"📌 <b>Son 3 mail:</b>\n\n"
-            f"{son_mail_basliklari(mailler, 3)}"
-        )
-        telegram_mesaj_gonder(mesaj)
-        logging.info("İlk açılış özeti gönderildi")
-        return {"ok": True, "message": "initial_check_done", "count": len(mailler)}
-
-    yeni_mail_var = ids != son_5_mail_idleri
-
-    if yeni_mail_var:
-        son_5_mail_idleri = ids.copy()
-        alert_mode_until = simdi + timedelta(minutes=10)
-
-        mesaj = (
-            "🚨 <b>Yeni mail bildirimi</b>\n\n"
-            "📌 <b>Son 3 mail:</b>\n\n"
-            f"{son_mail_basliklari(mailler, 3)}\n\n"
-            "⏱ <b>Alarm modu:</b> 10 dakika boyunca her dakika son 5 konu"
-        )
-        telegram_mesaj_gonder(mesaj)
-
-    if alert_mode_until and simdi < alert_mode_until:
-        mesaj = (
-            "🚨 <b>SON 5 MAİL KONUSU</b>\n\n"
-            f"{son_mail_basliklari(mailler, 5)}"
-        )
-        telegram_mesaj_gonder(mesaj)
-
-    if alert_mode_until and simdi >= alert_mode_until:
-        alert_mode_until = None
-        telegram_mesaj_gonder("✅ <b>Alarm modu sona erdi</b>")
-
-    if last_summary_time and (simdi - last_summary_time).total_seconds() >= 900:
-        inbox = len([m for m in mailler if "INBOX" in m["klasor"]])
-        spam = len([m for m in mailler if "Spam" in m["klasor"]])
-
-        mesaj = (
-            f"📊 <b>Mail Durum Özeti</b>\n\n"
-            f"📥 <b>Inbox:</b> {inbox}\n"
-            f"🚫 <b>Spam:</b> {spam}\n"
-            f"📦 <b>Toplam:</b> {len(mailler)}\n\n"
-            f"📌 <b>Son 3 mail:</b>\n\n"
-            f"{son_mail_basliklari(mailler, 3)}"
-        )
-        telegram_mesaj_gonder(mesaj)
-        last_summary_time = simdi
-        logging.info("15 dakikalık özet gönderildi")
-
-    # 5 dakikada bir heartbeat
-    if last_ping_time and (simdi - last_ping_time).total_seconds() >= 300:
-        telegram_mesaj_gonder(f"⚙️ <b>Bot çalışıyor</b>\n🕒 Son kontrol: {simdi.strftime('%H:%M:%S')}")
-        last_ping_time = simdi
-        logging.info("Heartbeat gönderildi")
-
-    logging.info("Mail kontrol tamamlandı")
-    return {"ok": True, "message": "check_done", "count": len(mailler)}
+        logging.exception(f"Mail kontrol hatası: {e}")
+        await tum_kullanicilara_gonder(context, f"❌ <b>Hata:</b> {escape(str(e))}")
 
 
-@web_app.route("/")
-def home():
-    return f"Bot is alive - {VERSION}", 200
+# --- KOMUTLAR ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    aktif_kullanicilar.add(chat_id)
+
+    await update.message.reply_text(f"🚀 Mail takibi başlatıldı! ({VERSION})")
+
+    # mevcut mailleri hafızaya al
+    mailler = mailleri_getir()
+    ids = [m["id"] for m in mailler[:5]]
+
+    global son_5_mail_idleri, ilk_kurulum_tamamlandi
+    son_5_mail_idleri = ids.copy()
+    ilk_kurulum_tamamlandi = True
 
 
-@web_app.route("/check", methods=["GET"])
-def check_route():
-    secret = request.args.get("key", "")
-    if secret != CRON_SECRET:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    result = mail_kontrol()
-    return jsonify(result), 200
+async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"📌 Aktif sürüm: {VERSION}")
 
 
-def startup_message():
-    time.sleep(5)
-    telegram_mesaj_gonder(f"🤖 Bot aktif ({VERSION})")
-    logging.info("Başlangıç mesajı gönderildi")
+# --- BAŞLAT ---
+Thread(target=run_web).start()
 
+app = ApplicationBuilder().token(TOKEN).build()
 
-def main():
-    threading.Thread(target=startup_message, daemon=True).start()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("version", version))
 
-    port = int(os.getenv("PORT", "10000"))
-    logging.info(f"Web server başlatılıyor. Port: {port}")
-    web_app.run(host="0.0.0.0", port=port)
+# 60 saniyede bir çalışır
+app.job_queue.run_repeating(mail_kontrol, interval=60, first=10)
 
-
-if __name__ == "__main__":
-    main()
+print(f"🤖 Mail bot çalışıyor... ({VERSION})")
+app.run_polling()
